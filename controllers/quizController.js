@@ -77,7 +77,7 @@ const createQuiz = async (req, res) => {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING quiz_id, access_code
         `;
-        // testing
+        // testin
         const quizValues = [title, description, creator_id, is_schedule, time_limit, access_code, subject_id, total_score, start_at];
         const quizResult = await client.query(quizInsertQuery, quizValues);
         const quiz_id = quizResult.rows[0].quiz_id;
