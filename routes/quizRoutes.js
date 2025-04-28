@@ -6,7 +6,13 @@ const {
     getAllQuizzesExceptOwner,
     deleteQuizById,
     updateQuizWithQuestions,
-    getQuizzesByUser, getQuizzesBySubject
+    getQuizzesByUser,
+    getQuizzesBySubject,
+    joinQuiz,
+    submitQuizAnswers,
+    getAllJoinedQuizzes,
+    getJoinedQuizDetails,
+    getQuizDetailsByAccessCode
 } = require('../controllers/quizController');
 const authenticateJWT = require('../middleware/authMiddleware');
 const router = express.Router();
@@ -26,4 +32,16 @@ router.put('/update-quiz/:quizId', authenticateJWT, updateQuizWithQuestions);
 router.delete('/delete-quiz/:quizId', authenticateJWT, deleteQuizById);
 
 router.get('/get-quizzes-by-subject/:subjectId', authenticateJWT, getQuizzesBySubject);
+
+router.post('/join-quiz', authenticateJWT, joinQuiz);
+
+router.post('/submit-quiz', authenticateJWT, submitQuizAnswers);
+
+router.get('/joined-quizzes', authenticateJWT, getAllJoinedQuizzes);
+
+router.get('/quiz-details-by-access-code', authenticateJWT, getQuizDetailsByAccessCode);
+
+router.get('/joined-quiz-details/:join_id', authenticateJWT, getJoinedQuizDetails);
+
+
 module.exports = router;

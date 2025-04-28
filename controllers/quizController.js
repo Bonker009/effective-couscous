@@ -366,101 +366,262 @@ const getQuizzesBySubject = async (req, res) => {
 };
 
 const joinQuiz = async (req, res) => {
-    const {access_code} = req.body;
     const student_id = req.user.userId;
+    const { access_code } = req.body;
 
     if (!access_code) {
-        return res.status(400).json({message: "Access code is required."});
+        return res.status(400).json({ message: "Access code is required to join the quiz." });
+    }
+
+    try {
+        // Check if quiz exists with the given access code
+        const quizResult = await client.query(
+            'SELECT * FROM quizzes WHERE access_code = $1',
+            [access_code]
+        );
+
+        if (quizResult.rows.length === 0) {
+            return res.status(404).json({ message: "Quiz not found or invalid access code." });
+        }
+
+        const quiz_id = quizResult.rows[0].quiz_id;
+
+        // Check if already joined the quiz
+        const existingJoin = await client.query(
+            'SELECT * FROM join_quiz WHERE quiz_id = $1 AND student_id = $2',
+            [quiz_id, student_id]
+        );
+        if (existingJoin.rows.length > 0) {
+            return res.status(400).json({ message: "You already joined this quiz." });
+        }
+
+        // Insert new join record
+        const joinResult = await client.query(
+            `INSERT INTO join_quiz (quiz_id, student_id, is_joined, start_time)
+             VALUES ($1, $2, TRUE, NOW())
+             RETURNING join_id`,
+            [quiz_id, student_id]
+        );
+
+        const join_id = joinResult.rows[0].join_id;
+
+        return res.status(201).json({ message: "Joined quiz successfully.", join_id });
+
+    } catch (err) {
+        console.error('Error joining quiz:', err);
+        return res.status(500).json({ message: "Error joining quiz." });
+    }
+};
+
+const submitQuizAnswers = async (req, res) => {
+    const student_id = req.user.userId;
+    const { join_id, answers } = req.body;
+
+    if (!join_id || !answers || !Array.isArray(answers)) {
+        return res.status(400).json({ message: "Join ID and answers are required." });
+    }
+
+    try {
+        // Check if the join record exists for the student and the quiz
+        const joinResult = await client.query(
+            'SELECT * FROM join_quiz WHERE join_id = $1 AND student_id = $2',
+            [join_id, student_id]
+        );
+
+        if (joinResult.rows.length === 0) {
+            return res.status(404).json({ message: "Join record not found." });
+        }
+
+        // Check if the quiz has already been finished (optional)
+        if (joinResult.rows[0].finished_at) {
+            return res.status(400).json({ message: "You have already submitted this quiz." });
+        }
+
+        // Validate answers and insert into student_answers table
+        let total_score = 0;
+        for (let answer of answers) {
+            const { question_id, option_id } = answer;
+
+            // Check if the answer is valid for this question
+            const validAnswer = await client.query(
+                'SELECT * FROM options WHERE option_id = $1 AND question_id = $2',
+                [option_id, question_id]
+            );
+
+            if (validAnswer.rows.length === 0) {
+                return res.status(400).json({ message: "Invalid answer choice for question ID " + question_id });
+            }
+
+            // Add points if the selected option is correct
+            if (validAnswer.rows[0].is_correct) {
+                const questionResult = await client.query(
+                    'SELECT points FROM questions WHERE question_id = $1',
+                    [question_id]
+                );
+                total_score += questionResult.rows[0].points;
+            }
+
+            // Insert or update the student's answer in the student_answers table
+            const existingAnswer = await client.query(
+                'SELECT * FROM student_answers WHERE join_id = $1 AND question_id = $2',
+                [join_id, question_id]
+            );
+
+            if (existingAnswer.rows.length > 0) {
+                // Update the existing answer if it already exists
+                await client.query(
+                    'UPDATE student_answers SET option_id = $1 WHERE join_id = $2 AND question_id = $3',
+                    [option_id, join_id, question_id]
+                );
+            } else {
+                // Insert a new answer if it doesn't exist
+                await client.query(
+                    'INSERT INTO student_answers (join_id, question_id, option_id) VALUES ($1, $2, $3)',
+                    [join_id, question_id, option_id]
+                );
+            }
+        }
+
+        // Update the join_quiz record with the final score and submission timestamp
+        await client.query(
+            'UPDATE join_quiz SET archive_score = $1, end_time = NOW(), is_joined = FALSE WHERE join_id = $2 AND student_id = $3',
+            [total_score, join_id, student_id]
+        );
+
+        return res.status(200).json({ message: "Quiz submitted successfully.", score: total_score });
+
+    } catch (err) {
+        console.error('Error submitting quiz:', err);
+        return res.status(500).json({ message: "Error submitting quiz." });
+    }
+};
+
+const getAllJoinedQuizzes = async (req, res) => {
+    const studentId = req.user.userId;  // Assuming user info is stored in req.user
+
+    try {
+        // Query the database for all quizzes the user has joined
+        const result = await client.query(`
+            SELECT
+                jq.join_id,
+                q.quiz_id,
+                q.title AS quiz_title,
+                jq.start_time AS quiz_start_time,
+                jq.end_time AS quiz_finish_time
+            FROM
+                join_quiz jq
+                INNER JOIN quizzes q ON jq.quiz_id = q.quiz_id
+            WHERE
+                jq.student_id = $1
+            ORDER BY
+                jq.start_time DESC;
+        `, [studentId]);
+
+        // If no quizzes found
+        if (result.rows.length === 0) {
+            return res.status(404).json({ message: "No quizzes found for the user." });
+        }
+
+        // Return the quizzes the user has joined
+        return res.status(200).json({ quizzes: result.rows });
+    } catch (err) {
+        console.error('Error fetching joined quizzes:', err);
+        return res.status(500).json({ message: "Error retrieving joined quizzes." });
+    }
+};
+const getJoinedQuizDetails = async (req, res) => {
+    const { join_id } = req.params;
+
+    try {
+        const result = await client.query(`
+            SELECT jq.join_id,
+                   q.quiz_id,
+                   q.title       AS quiz_title,
+                   q.description AS quiz_description,
+                   jq.start_time AS quiz_start_time,
+                   jq.end_time   AS quiz_finish_time,
+                   jq.archive_score,
+                   jq.is_joined,
+                   q.time_limit,
+                   q.start_at    AS quiz_start_at,
+                   json_agg(
+                           json_build_object(
+                                   'question_id', quest.question_id,
+                                   'question_text', quest.question_text,
+                                   'is_qcm', quest.is_qcm,
+                                   'points', quest.points,
+                                   'user_answer',
+                                   json_build_object(
+                                           'option_id', sa.option_id,
+                                           'answer_text',
+                                           CASE
+                                               WHEN sa.option_id IS NOT NULL
+                                                   THEN (SELECT option_text FROM options WHERE option_id = sa.option_id)
+                                               ELSE 'No answer'
+                                               END
+                                   )
+                           )
+                   ) AS questions_and_answers
+            FROM join_quiz jq
+                     INNER JOIN quizzes q ON jq.quiz_id = q.quiz_id
+                     LEFT JOIN questions quest ON q.quiz_id = quest.quiz_id
+                     LEFT JOIN student_answers sa ON jq.join_id = sa.join_id AND quest.question_id = sa.question_id
+            WHERE jq.join_id = $1
+            GROUP BY jq.join_id, q.quiz_id;
+        `, [join_id]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ message: "Joined quiz not found." });
+        }
+
+        return res.status(200).json({ quiz_details: result.rows[0] });
+    } catch (err) {
+        console.error('Error fetching joined quiz details:', err);
+        return res.status(500).json({ message: "Error retrieving quiz details." });
+    }
+};
+
+const getQuizDetailsByAccessCode = async (req, res) => {
+    const { access_code } = req.query;
+
+    if (!access_code) {
+        return res.status(400).json({ message: "Access code is required." });
     }
 
     try {
 
-        const quizQuery = `
-            SELECT quiz_id, title, description, is_schedule, start_at, time_limit
-            FROM quizzes
-            WHERE access_code = $1
-        `;
-        const quizResult = await client.query(quizQuery, [access_code]);
+        const result = await client.query(`
+            SELECT 
+                q.quiz_id,
+                q.title AS quiz_title,
+                q.description AS quiz_description,
+                q.time_limit,
+                q.start_at AS quiz_start_at,
+                json_agg(
+                    json_build_object(
+                        'question_id', quest.question_id,
+                        'question_text', quest.question_text,
+                        'is_qcm', quest.is_qcm,
+                        'points', quest.points
+                    )
+                ) AS questions
+            FROM 
+                quizzes q
+            LEFT JOIN questions quest ON q.quiz_id = quest.quiz_id
+            WHERE q.access_code = $1
+            GROUP BY q.quiz_id;
+        `, [access_code]);
 
-        if (quizResult.rows.length === 0) {
-            return res.status(404).json({message: "Invalid access code."});
+        if (result.rows.length === 0) {
+            return res.status(404).json({ message: "Quiz not found for the given access code." });
         }
 
-        const quiz = quizResult.rows[0];
-
-        const joinCheckQuery = `
-            SELECT join_id, session_id
-            FROM join_quiz
-            WHERE quiz_id = $1
-              AND student_id = $2
-        `;
-        const joinCheckResult = await client.query(joinCheckQuery, [quiz.quiz_id, student_id]);
-
-        let join_id, session_id;
-
-        if (joinCheckResult.rows.length > 0) {
-
-            join_id = joinCheckResult.rows[0].join_id;
-            session_id = joinCheckResult.rows[0].session_id;
-        } else {
-
-            const insertJoinQuizQuery = `
-                INSERT INTO join_quiz (quiz_id, student_id, is_joined)
-                VALUES ($1, $2, TRUE)
-                RETURNING join_id, session_id
-            `;
-            const newJoin = await client.query(insertJoinQuizQuery, [quiz.quiz_id, student_id]);
-            join_id = newJoin.rows[0].join_id;
-            session_id = newJoin.rows[0].session_id;
-
-            if (quiz.is_schedule === false && !session_id) {
-
-                const insertSessionQuery = `
-                    INSERT INTO sessions (quiz_id, host_id)
-                    VALUES ($1, $2)
-                    RETURNING session_id
-                `;
-                const newSession = await client.query(insertSessionQuery, [quiz.quiz_id, student_id]);
-                session_id = newSession.rows[0].session_id;
-
-                const updateJoinQuizSessionQuery = `
-                    UPDATE join_quiz
-                    SET session_id = $1
-                    WHERE join_id = $2
-                `;
-                await client.query(updateJoinQuizSessionQuery, [session_id, join_id]);
-            }
-
-            const questionsQuery = `
-                SELECT question_id
-                FROM questions
-                WHERE quiz_id = $1
-            `;
-            const questionsResult = await client.query(questionsQuery, [quiz.quiz_id]);
-            const questionIds = questionsResult.rows.map(q => q.question_id);
-
-            const answerInserts = questionIds.map(qid => {
-                return client.query(`
-                    INSERT INTO student_answers (join_id, question_id, option_id)
-                    VALUES ($1, $2)
-                `, [join_id, qid]);
-            });
-
-            await Promise.all(answerInserts);
-        }
-
-        return res.status(200).json({
-            message: "Joined quiz successfully.",
-            session_id,
-            quiz
-        });
-
+        return res.status(200).json({ quiz_details: result.rows[0] });
     } catch (err) {
-        console.error("Error joining quiz:", err);
-        return res.status(500).json({message: "Failed to join quiz."});
+        console.error('Error fetching quiz details by access code:', err);
+        return res.status(500).json({ message: "Error retrieving quiz details by access code." });
     }
 };
-
 
 module.exports = {
     createQuiz,
@@ -470,5 +631,10 @@ module.exports = {
     updateQuizWithQuestions,
     getQuizzesByUser,
     getAllQuizzesExceptOwner,
-    getQuizzesBySubject
+    getQuizzesBySubject,
+    joinQuiz,
+    submitQuizAnswers,
+    getAllJoinedQuizzes,
+    getJoinedQuizDetails,
+    getQuizDetailsByAccessCode
 };
